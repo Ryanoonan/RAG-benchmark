@@ -70,22 +70,7 @@ class Retriever:
 
     def retrieve(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """Retrieve top-k passages for a query"""
-        if self.index is None:
-            raise ValueError("Index not built. Call build_index() first.")
-
-        # Add E5 query prefix
-        query_embedding = self.model.encode([f"query: {query}"])
-
-        # Search
-        scores, indices = self.index.search(query_embedding.astype(np.float32), top_k)
-
-        results = []
-        for score, idx in zip(scores[0], indices[0]):
-            results.append(
-                {"text": self.passages[idx], "score": float(score), "index": int(idx)}
-            )
-
-        return results
+        return self.retrieve_batch([query], top_k)[0]
 
     def retrieve_batch(
         self, queries: List[str], top_k: int = 5

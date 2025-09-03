@@ -3,8 +3,9 @@ import argparse
 import json
 import logging
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from datasets import load_dataset
 
@@ -16,17 +17,23 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class RAGConfig:
-    """Configuration for RAG benchmark"""
+class Mode(Enum):
+    RAG = "rag"
+    BASELINE = "baseline"
 
+
+@dataclass
+class Config:
+    """Configuration for benchmark"""
+
+    mode: Mode
     generator_model_path: str = "meta-llama/Meta-Llama-3-8B-Instruct"
     # Model paths
     retriever_model_path: str = "intfloat/e5-base-v2"
     # Data paths
     popqa_dataset_path: str = "akariasai/PopQA"
-    index_path: str = ""  # Path to pre-built FAISS index
-    passages_path: str = ""  # Path to passages file corresponding to the index
+    index_path: Optional[str] = None  # Path to pre-built FAISS index
+    passages_path: Optional[str] = None  # Path to passages file corresponding to the index
 
     # Retrieval settings
     top_k: int = 5
@@ -41,24 +48,67 @@ class RAGConfig:
     num_samples: int = 100  # Use -1 for full dataset
 
 
+class BaselineRunner:
+    """Runner for baseline question answering without retrieval"""
+    
+    def __init__(self, generator):
+        self.generator = generator
+        
+    def run_batch(self, queries: List[str], max_new_tokens: int = 100) -> List[str]:
+        """Run batch inference without retrieval"""
+        return self.generator.generate_batch(queries, None, max_new_tokens)
+
+
+class RAGRunner:
+    """Runner for RAG-based question answering with retrieval"""
+    
+    def __init__(self, generator, retriever: Retriever):
+        self.generator = generator
+        self.retriever = retriever
+        
+    def run_batch(self, queries: List[str], top_k: int = 5, max_new_tokens: int = 100) -> List[str]:
+        """Run batch inference with retrieval"""
+        retrieved_passages_batch = self.retriever.retrieve_batch(queries, top_k)
+        return self.generator.generate_batch(queries, retrieved_passages_batch, max_new_tokens)
+
+
+class QAEngine:
+    """Question Answering engine that delegates to a runner"""
+    
+    def __init__(self, runner):
+        self.runner = runner
+        
+    def answer_batch(self, queries: List[str], **kwargs) -> List[str]:
+        """Answer a batch of queries using the configured runner"""
+        return self.runner.run_batch(queries, **kwargs)
+
+
 class RAGPipeline:
-    """Main RAG pipeline orchestrating retrieval and generation"""
+    """Main pipeline orchestrating retrieval and generation"""
 
-    def __init__(self, config: RAGConfig):
+    def __init__(self, config: Config):
         self.config = config
-        self.retriever = Retriever(config.retriever_model_path)
-        self.generator = None  # Will be initialized when model path is provided
+        
+        # Create appropriate runner and QA engine based on mode
+        if config.mode == Mode.RAG:
+            if not config.index_path or not config.passages_path:
+                raise ValueError("Both index_path and passages_path must be provided for RAG mode")
+            if not config.generator_model_path:
+                raise ValueError("Generator model path must be provided for RAG mode")
+            generator = Llama38bInstructGenerator(config.generator_model_path)
+            retriever = Retriever(config.retriever_model_path)
+            retriever.load_index(config.index_path, config.passages_path)
+            runner = RAGRunner(generator, retriever)
+        elif config.mode == Mode.BASELINE:
+            if not config.generator_model_path:
+                raise ValueError("Generator model path must be provided for baseline mode")
+            generator = Llama38bInstructGenerator(config.generator_model_path)
+            runner = BaselineRunner(generator)
+        else:
+            raise ValueError(f"Unsupported mode: {config.mode}")
+            
+        self.qa_engine = QAEngine(runner)
 
-    def load_generator(self):
-        """Load generator model"""
-        if not self.config.generator_model_path:
-            logger.warning(
-                "Generator model path is empty. Generator will not be loaded."
-            )
-            return
-        self.generator = Llama38bInstructGenerator(
-            self.config.generator_model_path
-        )  # TODO: Replace appropriately
 
     def load_popqa_dataset(self) -> List[Dict[str, Any]]:
         """Load PopQA dataset"""
@@ -88,15 +138,6 @@ class RAGPipeline:
         # Load data
         popqa_data = self.load_popqa_dataset()
 
-        # Load pre-built retrieval index
-        if not self.config.index_path or not self.config.passages_path:
-            raise ValueError("Both index_path and passages_path must be provided")
-
-        self.retriever.load_index(self.config.index_path, self.config.passages_path)
-
-        # Load generator if path provided
-        if self.config.generator_model_path:
-            self.load_generator()
 
         results = []
 
@@ -123,20 +164,12 @@ class RAGPipeline:
             # Extract queries from batch
             queries = [sample["question"] for sample in batch_samples]
 
-            # Retrieve passages in batch
-            retrieved_passages_batch = self.retriever.retrieve_batch(
-                queries, self.config.top_k
+            # Generate answers using QA engine
+            generated_answers = self.qa_engine.answer_batch(
+                queries,
+                top_k=self.config.top_k,
+                max_new_tokens=self.config.max_new_tokens
             )
-
-            # Generate answers in batch if generator is available
-            generated_answers = [""] * len(queries)
-            if self.generator:
-                generated_answers = self.generator.generate_batch(
-                    queries,
-                    retrieved_passages_batch,
-                    max_new_tokens=self.config.max_new_tokens,
-                    temperature=self.config.temperature,
-                )
 
             # Process batch results
             for i, (sample, retrieved_passages, generated_answer) in enumerate(
@@ -229,16 +262,24 @@ def main():
         required=True,
         help="Path to passages file corresponding to JSONL index",
     )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["rag", "baseline"],
+        default="rag",
+        help="Mode to run: 'rag' for retrieval-augmented generation or 'baseline' for direct generation",
+    )
 
     args = parser.parse_args()
 
     # Create config
-    config = RAGConfig(
+    config = Config(
+        mode=Mode(args.mode),
         generator_model_path=args.generator_model_path,
         num_samples=args.num_samples,
         batch_size=args.batch_size,
-        index_path=args.index_path,
-        passages_path=args.passages_path,
+        index_path=args.index_path if args.mode == "rag" else None,
+        passages_path=args.passages_path if args.mode == "rag" else None,
         temperature=0.0,
     )
 
