@@ -3,7 +3,7 @@ import argparse
 import json
 import logging
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class Mode(Enum):
+class Mode(StrEnum):
     RAG = "rag"
     BASELINE = "baseline"
 
@@ -172,19 +172,17 @@ class RAGPipeline:
             )
 
             # Process batch results
-            for i, (sample, retrieved_passages, generated_answer) in enumerate(
-                zip(batch_samples, retrieved_passages_batch, generated_answers)
+            for i, (sample, generated_answer) in enumerate(
+                zip(batch_samples, generated_answers)
             ):
                 query = sample["question"]
                 possible_answers = sample.get("possible_answers", [])
-                ground_truth = possible_answers[0] if possible_answers else ""
 
                 result = {
                     "question": query,
-                    "ground_truth": ground_truth,
                     "possible_answers": possible_answers,
-                    "retrieved_passages": retrieved_passages,
                     "generated_answer": generated_answer,
+                    "method": self.config.mode.value,
                 }
                 results.append(result)
 
@@ -209,7 +207,7 @@ class RAGPipeline:
                 incremental_metrics = evaluate_results(current_results)
                 current_results["metrics"] = incremental_metrics
                 logger.info(
-                    f"Current F1: {incremental_metrics['avg_f1_score']:.4f}, EM: {incremental_metrics['avg_exact_match']:.4f}"
+                    f"Current F1: {incremental_metrics['avg_f1_score']:.4f}"
                 )
 
             with open(output_path_obj, "w") as f:
@@ -271,7 +269,7 @@ def main():
     )
 
     args = parser.parse_args()
-
+    logger.info(f"Creating config with args {args}")
     # Create config
     config = Config(
         mode=Mode(args.mode),
