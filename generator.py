@@ -6,10 +6,25 @@ from typing import Any, Dict, List, Optional
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from prompt import build_instruct_rag_prompt, build_baseline_instruct_prompt, build_rag_prompt, build_baseline_prompt
+from prompt import (
+    build_baseline_instruct_prompt,
+    build_baseline_prompt,
+    build_instruct_rag_prompt,
+    build_rag_prompt,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def get_generator_from_path(model_path: str, device: str = "auto") -> Any:
+    """Factory method to get generator instance from model path"""
+    if "Meta-Llama-3-8B-Instruct" in model_path:
+        return Llama38bInstructGenerator(model_path, device)
+    elif "gpt2-medium" in model_path:
+        return GPT2MediumGenerator(model_path, device)
+    else:
+        raise ValueError(f"Unsupported generator model path: {model_path}")
 
 
 class Llama38bInstructGenerator:

@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 from datasets import load_dataset
 
 from eval import evaluate_results
-from generator import Llama38bInstructGenerator
+from generator import Llama38bInstructGenerator, get_generator_from_path
 from retriever import Retriever
 
 logging.basicConfig(level=logging.INFO)
@@ -33,7 +33,9 @@ class Config:
     # Data paths
     popqa_dataset_path: str = "akariasai/PopQA"
     index_path: Optional[str] = None  # Path to pre-built FAISS index
-    passages_path: Optional[str] = None  # Path to passages file corresponding to the index
+    passages_path: Optional[str] = (
+        None  # Path to passages file corresponding to the index
+    )
 
     # Retrieval settings
     top_k: int = 5
@@ -50,10 +52,10 @@ class Config:
 
 class BaselineRunner:
     """Runner for baseline question answering without retrieval"""
-    
+
     def __init__(self, generator):
         self.generator = generator
-        
+
     def run_batch(self, queries: List[str], max_new_tokens: int = 100) -> List[str]:
         """Run batch inference without retrieval"""
         return self.generator.generate_batch(queries, None, max_new_tokens)
@@ -61,23 +63,27 @@ class BaselineRunner:
 
 class RAGRunner:
     """Runner for RAG-based question answering with retrieval"""
-    
+
     def __init__(self, generator, retriever: Retriever):
         self.generator = generator
         self.retriever = retriever
-        
-    def run_batch(self, queries: List[str], top_k: int = 5, max_new_tokens: int = 100) -> List[str]:
+
+    def run_batch(
+        self, queries: List[str], top_k: int = 5, max_new_tokens: int = 100
+    ) -> List[str]:
         """Run batch inference with retrieval"""
         retrieved_passages_batch = self.retriever.retrieve_batch(queries, top_k)
-        return self.generator.generate_batch(queries, retrieved_passages_batch, max_new_tokens)
+        return self.generator.generate_batch(
+            queries, retrieved_passages_batch, max_new_tokens
+        )
 
 
 class QAEngine:
     """Question Answering engine that delegates to a runner"""
-    
+
     def __init__(self, runner):
         self.runner = runner
-        
+
     def answer_batch(self, queries: List[str], **kwargs) -> List[str]:
         """Answer a batch of queries using the configured runner"""
         return self.runner.run_batch(queries, **kwargs)
@@ -88,27 +94,30 @@ class RAGPipeline:
 
     def __init__(self, config: Config):
         self.config = config
-        
+
         # Create appropriate runner and QA engine based on mode
         if config.mode == Mode.RAG:
             if not config.index_path or not config.passages_path:
-                raise ValueError("Both index_path and passages_path must be provided for RAG mode")
+                raise ValueError(
+                    "Both index_path and passages_path must be provided for RAG mode"
+                )
             if not config.generator_model_path:
                 raise ValueError("Generator model path must be provided for RAG mode")
-            generator = Llama38bInstructGenerator(config.generator_model_path)
+            generator = get_generator_from_path(config.generator_model_path)
             retriever = Retriever(config.retriever_model_path)
             retriever.load_index(config.index_path, config.passages_path)
             runner = RAGRunner(generator, retriever)
         elif config.mode == Mode.BASELINE:
             if not config.generator_model_path:
-                raise ValueError("Generator model path must be provided for baseline mode")
-            generator = Llama38bInstructGenerator(config.generator_model_path)
+                raise ValueError(
+                    "Generator model path must be provided for baseline mode"
+                )
+            generator = get_generator_from_path(config.generator_model_path)
             runner = BaselineRunner(generator)
         else:
             raise ValueError(f"Unsupported mode: {config.mode}")
-            
-        self.qa_engine = QAEngine(runner)
 
+        self.qa_engine = QAEngine(runner)
 
     def load_popqa_dataset(self) -> List[Dict[str, Any]]:
         """Load PopQA dataset"""
@@ -137,7 +146,6 @@ class RAGPipeline:
 
         # Load data
         popqa_data = self.load_popqa_dataset()
-
 
         results = []
 
@@ -168,7 +176,7 @@ class RAGPipeline:
             generated_answers = self.qa_engine.answer_batch(
                 queries,
                 top_k=self.config.top_k,
-                max_new_tokens=self.config.max_new_tokens
+                max_new_tokens=self.config.max_new_tokens,
             )
 
             # Process batch results
@@ -206,9 +214,7 @@ class RAGPipeline:
             if results:
                 incremental_metrics = evaluate_results(current_results)
                 current_results["metrics"] = incremental_metrics
-                logger.info(
-                    f"Current F1: {incremental_metrics['avg_f1_score']:.4f}"
-                )
+                logger.info(f"Current F1: {incremental_metrics['avg_f1_score']:.4f}")
 
             with open(output_path_obj, "w") as f:
                 json.dump(current_results, f, indent=2)
